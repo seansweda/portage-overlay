@@ -1,8 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE pkgmetadata SYSTEM "http://www.gentoo.org/dtd/metadata.dtd">
 <pkgmetadata>
-	<maintainer type="project">
-		<email>net-mail@gentoo.org</email>
-		<name>Net-Mail</name>
-	</maintainer>
+    <maintainer type="project">
+        <email>net-mail@gentoo.org</email>
+        <name>Net-Mail</name>
+    </maintainer>
+    <use>
+        <flag name="oauth">
+        Enable OAuth2 support in SMTP and POP auth
+        </flag>
+    </use>
 </pkgmetadata>
