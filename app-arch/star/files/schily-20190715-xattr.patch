@@ -1,0 +1,1570 @@
+diff -u star-1.6/star/acl_unix.c schily-2019-07-15/star/acl_unix.c
+--- star-1.6/star/acl_unix.c	2019-01-19 14:02:25.000000000 -0500
++++ schily-2019-07-15/star/acl_unix.c	2019-07-08 18:11:53.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)acl_unix.c	1.57 19/01/19 Copyright 2001-2019 J. Schilling */
++/* @(#)acl_unix.c	1.59 19/07/09 Copyright 2001-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)acl_unix.c	1.57 19/01/19 Copyright 2001-2019 J. Schilling";
++	"@(#)acl_unix.c	1.59 19/07/09 Copyright 2001-2019 J. Schilling";
+ #endif
+ /*
+  *	ACL get and set routines for unix like operating systems.
+@@ -85,6 +85,7 @@
+ #include <schily/stdlib.h>	/* Needed for Solaris ACL code (malloc/free) */
+ #include <schily/unistd.h>
+ #include <schily/dirent.h>
++#include <schily/fcntl.h>	/* For open() with hop_dirs() */
+ #include <schily/string.h>
+ #include <schily/stat.h>
+ #define	GT_COMERR		/* #define comerr gtcomerr */
+@@ -171,6 +172,8 @@
+ #ifdef	HAVE_POSIX_ACL
+ LOCAL	BOOL	acl_to_info	__PR((char *name, int type, pathstore_t *acltext));
+ LOCAL	BOOL	acl_add_ids	__PR((char *name, pathstore_t *infopath, char *acltext));
++LOCAL	acl_t	lacl_get_file	__PR((char *name, acl_type_t type));
++LOCAL	int	lacl_set_file	__PR((char *name, acl_type_t type, acl_t acl));
+ #endif
+ 
+ /*
+@@ -179,6 +182,11 @@
+ #ifdef	HAVE_SUN_ACL
+ #ifndef	HAVE_NFSV4_ACL
+ LOCAL	BOOL	get_ufs_acl	__PR((FINFO *info, aclent_t **aclpp, int *aclcountp));
++LOCAL	int	lacl		__PR((char *name, int cmd,
++					int nentries, void *aclbufp));
++#else
++LOCAL	int	lacl_get	__PR((char *name, int flag, acl_t **aclp));
++LOCAL	int	lacl_set	__PR((char *name, acl_t *aclp));
+ #endif
+ LOCAL	char	*acl_add_ids	__PR((char *dst, char *from, char *end, int *sizep));
+ #endif
+@@ -267,7 +275,7 @@
+ 	if (acltext->ps_size == 0)
+ 		init_pspace(PS_EXIT, acltext);
+ 	acltext->ps_path[0] = '\0';
+-	if ((acl = acl_get_file(name, type)) == NULL) {
++	if ((acl = lacl_get_file(name, type)) == NULL) {
+ 		register int err = geterrno();
+ #ifdef	ENOTSUP
+ 		/*
+@@ -524,7 +532,7 @@
+ 				(void) errabort(E_BADACL, info->f_name, TRUE);
+ 			}
+ 		} else {
+-			if (acl_set_file(info->f_name, ACL_TYPE_NFS4,
++			if (lacl_set_file(info->f_name, ACL_TYPE_NFS4,
+ 			    acl) < 0) {
+ 				/*
+ 				 * XXX What should we do if errno is
+@@ -576,7 +584,7 @@
+ 			(void) errabort(E_BADACL, info->f_name, TRUE);
+ 		}
+ 	} else {
+-		if (acl_set_file(info->f_name, ACL_TYPE_ACCESS, acl) < 0) {
++		if (lacl_set_file(info->f_name, ACL_TYPE_ACCESS, acl) < 0) {
+ 			/*
+ 			 * XXX What should we do if errno is ENOTSUP/ENOSYS?
+ 			 */
+@@ -653,7 +661,7 @@
+ 			(void) errabort(E_BADACL, info->f_name, TRUE);
+ 		}
+ 	} else {
+-		if (acl_set_file(info->f_name, ACL_TYPE_DEFAULT, acl) < 0) {
++		if (lacl_set_file(info->f_name, ACL_TYPE_DEFAULT, acl) < 0) {
+ 			/*
+ 			 * XXX What should we do if errno is ENOTSUP/ENOSYS?
+ 			 */
+@@ -671,6 +679,89 @@
+ 		free_pspace(&aclps);
+ }
+ 
++LOCAL acl_t
++lacl_get_file(name, type)
++	char		*name;
++	acl_type_t	type;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	acl_t	ret;
++
++	if ((ret = acl_get_file(name, type)) == NULL &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret != NULL)
++		return (ret);
++
++	fd = hop_dirs(name, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = acl_get_file(name, type);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
++LOCAL int
++lacl_set_file(name, type, acl)
++	char		*name;
++	acl_type_t	type;
++	acl_t		acl;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	int	ret;
++
++	if ((ret = acl_set_file(name, type, acl)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(name, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = acl_set_file(name, type, acl);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
+ #endif  /* HAVE_POSIX_ACL The withdrawn POSIX.1e draft */
+ 
+ #ifdef	HAVE_SUN_ACL	/* The UFS ACL implementation */
+@@ -728,7 +819,7 @@
+ 		return (TRUE);
+ 
+ #ifdef	HAVE_NFSV4_ACL
+-	if (acl_get(info->f_name, ACL_NO_TRIVIAL, &aclp) < 0) {
++	if (lacl_get(info->f_name, ACL_NO_TRIVIAL, &aclp) < 0) {
+ 		if (!errhidden(E_GETACL, info->f_name)) {
+ 			if (!errwarnonly(E_GETACL, info->f_name))
+ 				xstats.s_getaclerrs++;
+@@ -874,7 +965,7 @@
+ #ifdef	HAVE_ST_ACLCNT
+ 	aclcount = info->f_aclcnt;	/* UnixWare */
+ #else
+-	if ((aclcount = acl(info->f_sname, GETACLCNT, 0, NULL)) < 0) {
++	if ((aclcount = lacl(info->f_sname, GETACLCNT, 0, NULL)) < 0) {
+ #ifdef	ENOSYS
+ 		if (geterrno() == ENOSYS)
+ 			return (TRUE);
+@@ -910,7 +1001,7 @@
+ 		}
+ 		return (FALSE);
+ 	}
+-	if (acl(info->f_sname, GETACL, aclcount, aclp) < 0) {
++	if (lacl(info->f_sname, GETACL, aclcount, aclp) < 0) {
+ 		if (!errhidden(E_GETACL, info->f_name)) {
+ 			if (!errwarnonly(E_GETACL, info->f_name))
+ 				xstats.s_getaclerrs++;
+@@ -924,6 +1015,134 @@
+ 	*aclcountp = aclcount;
+ 	return (TRUE);
+ }
++
++LOCAL int
++lacl(name, cmd, nentries, aclbufp)
++	char	*name;
++	int	cmd;
++	int	nentries;
++	void	*aclbufp;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	int	ret;
++
++	if ((ret = acl(name, cmd, nentries, aclbufp)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(name, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = acl(name, cmd, nentries, aclbufp);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
++
++#else
++LOCAL int
++lacl_get(name, flag, aclp)
++	char	*name;
++	int	flag;
++	acl_t	**aclp;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	int	ret;
++
++	if ((ret = acl_get(name, flag, aclp)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(name, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = acl_get(name, flag, aclp);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
++LOCAL int
++lacl_set(name, aclp)
++	char	*name;
++	acl_t	*aclp;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	int	ret;
++
++	if ((ret = acl_set(name, aclp)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(name, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = acl_set(name, aclp);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
+ #endif	/* HAVE_NFSV4_ACL */
+ 
+ /*
+@@ -1230,7 +1449,7 @@
+ 			(void) errabort(E_BADACL, info->f_name, TRUE);
+ 		}
+ 	} else {
+-		if (acl_set(info->f_name, aclp) < 0) {
++		if (lacl_set(info->f_name, aclp) < 0) {
+ 			BOOL	no_error = FALSE;
+ 
+ 			if (no_acl) {
+@@ -1240,7 +1459,7 @@
+ 				 * This should catch the ENOSYS case which
+ 				 * happens e.g. if the target is a socket.
+ 				 */
+-				if (acl_get(info->f_name,
++				if (lacl_get(info->f_name,
+ 					    ACL_NO_TRIVIAL, &xaclp) >= 0) {
+ 					if (xaclp == NULL)
+ 						no_error = TRUE;
+@@ -1271,7 +1490,7 @@
+ 			(void) errabort(E_BADACL, info->f_name, TRUE);
+ 		}
+ 	} else {
+-		if (acl(info->f_name, SETACL, aclcount, aclp) < 0) {
++		if (lacl(info->f_name, SETACL, aclcount, aclp) < 0) {
+ 			BOOL	no_error = FALSE;
+ 			/*
+ 			 * XXX What should we do if errno is ENOSYS?
+@@ -1283,7 +1502,7 @@
+ 				 * This should catch the ENOSYS case which
+ 				 * happens e.g. if the target is a socket.
+ 				 */
+-				aclcnt = acl(info->f_name, GETACLCNT, 0, NULL);
++				aclcnt = lacl(info->f_name, GETACLCNT, 0, NULL);
+ 				if (aclcnt <= MIN_ACL_ENTRIES)
+ 					no_error = TRUE;
+ 			}
+diff -u star-1.6/star/create.c schily-2019-07-15/star/create.c
+--- star-1.6/star/create.c	2019-03-11 15:05:00.000000000 -0400
++++ schily-2019-07-15/star/create.c	2019-07-04 16:07:40.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)create.c	1.156 19/03/11 Copyright 1985, 1995, 2001-2019 J. Schilling */
++/* @(#)create.c	1.157 19/07/04 Copyright 1985, 1995, 2001-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)create.c	1.156 19/03/11 Copyright 1985, 1995, 2001-2019 J. Schilling";
++	"@(#)create.c	1.157 19/07/04 Copyright 1985, 1995, 2001-2019 J. Schilling";
+ #endif
+ /*
+  *	Copyright (c) 1985, 1995, 2001-2019 J. Schilling
+@@ -134,6 +134,8 @@
+ extern	BOOL	dirmode;
+ extern	BOOL	paxfollow;
+ extern	BOOL	doacl;
++extern	BOOL	doxattr;
++extern	BOOL	dolxattr;
+ extern	BOOL	nodesc;
+ extern	BOOL	nomount;
+ extern	BOOL	interactive;
+@@ -399,6 +401,10 @@
+ 	if (doacl)
+ 		(void) get_acls(info);
+ #endif  /* USE_ACL */
++#ifdef	USE_XATTR
++	if (dolxattr)
++		(void) get_xattr(info);
++#endif
+ 	return (TRUE);
+ }
+ 
+diff -u star-1.6/star/diff.c schily-2019-07-15/star/diff.c
+--- star-1.6/star/diff.c	2019-01-15 19:07:29.000000000 -0500
++++ schily-2019-07-15/star/diff.c	2019-07-04 16:12:06.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)diff.c	1.100 19/01/16 Copyright 1993-2019 J. Schilling */
++/* @(#)diff.c	1.104 19/07/04 Copyright 1993-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)diff.c	1.100 19/01/16 Copyright 1993-2019 J. Schilling";
++	"@(#)diff.c	1.104 19/07/04 Copyright 1993-2019 J. Schilling";
+ #endif
+ /*
+  *	List differences between a (tape) archive and
+@@ -78,6 +78,7 @@
+ #endif
+ #ifdef USE_XATTR
+ extern	BOOL	doxattr;
++extern	BOOL	dolxattr;
+ #else
+ #define	doxattr	FALSE
+ #endif
+@@ -200,11 +201,8 @@
+ 		void_file(info);
+ 		return;
+ 	}
+-	/*
+-	 * Use getinfo() if we like to compare ACLs/xattr too.
+-	 */
+-	if (((doacl || doxattr)? !getinfo(info->f_name, &finfo):
+-				!_getinfo(info->f_name, &finfo))) {
++
++	if (!_getinfo(info->f_name, &finfo)) {
+ 		if (!errhidden(E_STAT, info->f_name)) {
+ 			if (!errwarnonly(E_STAT, info->f_name))
+ 				xstats.s_staterrs++;
+@@ -214,6 +212,15 @@
+ 		void_file(info);
+ 		return;
+ 	}
++#ifdef	USE_ACL
++	if (doacl)
++		(void) get_acls(&finfo);
++#endif  /* USE_ACL */
++#ifdef	USE_XATTR
++	if (dolxattr)
++		(void) get_xattr(&finfo);
++#endif
++
+ 	/*
+ 	 * We cannot compare the link count if this is a CPIO archive
+ 	 * and the link count is < 2. Even if the link count is >= 2, it
+@@ -239,9 +246,12 @@
+ 
+ 	}
+ 
+-	if ((diffopts & D_NLINK) && info->f_nlink > 0 &&
++	if ((diffopts & (D_NLINK|D_DNLINK)) && info->f_nlink > 0 &&
+ 			info->f_nlink != finfo.f_nlink) {
+-		diffs |= D_NLINK;
++		if ((diffopts & D_DNLINK) && is_dir(info))
++			diffs |= D_DNLINK;
++		else if ((diffopts & D_NLINK) && !is_dir(info))
++			diffs |= D_NLINK;
+ 	}
+ 
+ 	if ((diffopts & D_UID) && info->f_uid != finfo.f_uid) {
+@@ -303,11 +313,16 @@
+ 			    (finfo.f_flags & F_NSECS) &&
+ 			    info->f_ansec != finfo.f_ansec) {
+ 				diffs |= D_ANTIME;
+-				if ((info->f_ansec % 1000 == 0 ||
++				if ((info->f_ansec % 1000 == 0 || /* UFS */
+ 				    finfo.f_ansec % 1000 == 0) &&
+ 				    (info->f_ansec / 1000 ==
+ 				    finfo.f_ansec / 1000))
+ 					diffs &= ~D_ANTIME;
++				else if ((info->f_ansec % 100 == 0 || /* NTFS */
++				    finfo.f_ansec % 100 == 0) &&
++				    (info->f_ansec / 100 ==
++				    finfo.f_ansec / 100))
++					diffs &= ~D_ANTIME;
+ 			}
+ 		}
+ 	}
+@@ -324,7 +339,12 @@
+ 					    finfo.f_mnsec % 1000 == 0) &&
+ 					    (info->f_mnsec / 1000 ==
+ 					    finfo.f_mnsec / 1000))
+-					diffs &= ~D_MNTIME;
++						diffs &= ~D_MNTIME;
++					else if ((info->f_mnsec % 100 == 0 ||
++					    finfo.f_mnsec % 100 == 0) &&
++					    (info->f_mnsec / 100 ==
++					    finfo.f_mnsec / 100))
++						diffs &= ~D_MNTIME;
+ 				}
+ 			}
+ 		}
+@@ -337,11 +357,16 @@
+ 			    (finfo.f_flags & F_NSECS) &&
+ 			    info->f_cnsec != finfo.f_cnsec) {
+ 				diffs |= D_CNTIME;
+-				if ((info->f_cnsec % 1000 == 0 ||
++				if ((info->f_cnsec % 1000 == 0 || /* UFS */
+ 				    finfo.f_cnsec % 1000 == 0) &&
+ 				    (info->f_cnsec / 1000 ==
+ 				    finfo.f_cnsec / 1000))
+-				diffs &= ~D_CNTIME;
++					diffs &= ~D_CNTIME;
++				else if ((info->f_cnsec % 100 == 0 || /* NTFS */
++				    finfo.f_cnsec % 100 == 0) &&
++				    (info->f_cnsec / 100 ==
++				    finfo.f_cnsec / 100))
++					diffs &= ~D_CNTIME;
+ 			}
+ 		}
+ 	}
+@@ -500,7 +525,7 @@
+ #endif
+ 
+ #ifdef USE_XATTR
+-	if (doxattr && (diffopts & D_XATTR)) {
++	if (dolxattr && (diffopts & D_XATTR)) {
+ 		if ((info->f_xflags & XF_XATTR) !=
+ 		    (finfo.f_xflags & XF_XATTR)) {
+ 			diffs |= D_XATTR;
+@@ -805,6 +830,8 @@
+ 		prdopt(f, "type", printed++);
+ 	if (flags & D_NLINK)
+ 		prdopt(f, "nlink", printed++);
++	if (flags & D_DNLINK)
++		prdopt(f, "dnlink", printed++);
+ 	if (flags & D_UID)
+ 		prdopt(f, "uid", printed++);
+ 	if (flags & D_GID)
+diff -u star-1.6/star/diff.h schily-2019-07-15/star/diff.h
+--- star-1.6/star/diff.h	2018-04-24 16:25:21.000000000 -0400
++++ schily-2019-07-15/star/diff.h	2019-06-16 08:36:08.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)diff.h	1.16 18/04/24 Copyright 1993-2018 J. Schilling */
++/* @(#)diff.h	1.17 19/06/16 Copyright 1993-2019 J. Schilling */
+ /*
+  *	Definitions for the taylorable diff command
+  *
+- *	Copyright (c) 1993-2018 J. Schilling
++ *	Copyright (c) 1993-2019 J. Schilling
+  */
+ /*
+  * The contents of this file are subject to the terms of the
+@@ -57,6 +57,7 @@
+ #define	D_ANTIME	0x1000000
+ #define	D_MNTIME	0x2000000
+ #define	D_CNTIME	0x4000000
++#define	D_DNLINK	0x8000000
+ #define	D_MAX		0x80000000
+ 
+ /*
+diff -u star-1.6/star/extract.c schily-2019-07-15/star/extract.c
+--- star-1.6/star/extract.c	2019-01-15 19:17:48.000000000 -0500
++++ schily-2019-07-15/star/extract.c	2019-06-16 06:29:53.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)extract.c	1.165 19/01/16 Copyright 1985-2019 J. Schilling */
++/* @(#)extract.c	1.166 19/06/16 Copyright 1985-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)extract.c	1.165 19/01/16 Copyright 1985-2019 J. Schilling";
++	"@(#)extract.c	1.166 19/06/16 Copyright 1985-2019 J. Schilling";
+ #endif
+ /*
+  *	extract files from archive
+@@ -671,10 +671,19 @@
+ 		 * the resolution in the archive is nanoseconds, we need to
+ 		 * check based on microseconds to prevent extracting the
+ 		 * file from the archive again and again.
++		 * This is the UFS variant.
+ 		 */
+ 		if ((cinfo->f_mnsec % 1000 == 0) &&
+ 		    ((cinfo->f_mnsec / 1000) >= (info->f_mnsec / 1000)))
+ 			goto isnewer;
++
++		/*
++		 * This is the NTFS (Win-DOS) variant that is based on
++		 * 1/10 microseconds since 1601.
++		 */
++		if ((cinfo->f_mnsec % 100 == 0) &&
++		    ((cinfo->f_mnsec / 100) >= (info->f_mnsec / 100)))
++			goto isnewer;
+ 	} else if ((cinfo->f_mtime % 2) == 0 && (cinfo->f_mtime + 1) == info->f_mtime) {
+ 		/*
+ 		 * The DOS FAT filestem does only support a time granularity
+diff -u star-1.6/star/fifo.c schily-2019-07-15/star/fifo.c
+--- star-1.6/star/fifo.c	2019-03-01 18:44:57.000000000 -0500
++++ schily-2019-07-15/star/fifo.c	2019-06-09 08:13:05.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)fifo.c	1.100 19/03/02 Copyright 1989, 1994-2019 J. Schilling */
++/* @(#)fifo.c	1.104 19/06/09 Copyright 1989, 1994-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)fifo.c	1.100 19/03/02 Copyright 1989, 1994-2019 J. Schilling";
++	"@(#)fifo.c	1.104 19/06/09 Copyright 1989, 1994-2019 J. Schilling";
+ #endif
+ /*
+  *	A "fifo" that uses shared memory between two processes
+@@ -103,6 +103,9 @@
+ #else
+ #define	EDEBUG(a)
+ #endif
++#ifdef	HANG_DEBUG
++#include <schily/string.h>
++#endif
+ 
+ 	/*
+ 	 * roundup(x, y), x needs to be unsigned or x+y non-negative.
+@@ -138,12 +141,17 @@
+ int	hiw;
+ int	low;
+ 
+-LOCAL	int	waitchan;
++LOCAL	int	waitchan;	/* Current waiting channel for debugging */
+ 
+ EXPORT	void	initfifo	__PR((void));
+ LOCAL	void	fifo_setparams	__PR((void));
+ EXPORT	void	fifo_ibs_shrink	__PR((int newsize));
+ EXPORT	void	runfifo		__PR((int ac, char *const *av));
++#ifdef	HANG_DEBUG
++LOCAL	char	*prgflags	__PR((int f, char *fbuf));
++LOCAL	char	*preflags	__PR((int f, char *fbuf));
++LOCAL	char	*prpflags	__PR((int f, char *fbuf));
++#endif
+ EXPORT	void	fifo_prmp	__PR((int sig));
+ EXPORT	void	fifo_stats	__PR((void));
+ LOCAL	int	swait		__PR((int f, int chan));
+@@ -281,6 +289,7 @@
+ 	mp->base = &buf[addsize];
+ 	mp->iblocked = FALSE;
+ 	mp->oblocked = FALSE;
++	mp->mayoblock = FALSE;
+ 	/*
+ 	 * Note that R'est'size is used to store shareable strings from the
+ 	 * 'g'lobal P-1.2001 headers.
+@@ -320,7 +329,7 @@
+ #endif
+ 
+ 	mp->putptr = mp->getptr = mp->base;
+-	fifo_prmp(0);
++	fifo_prmp(0);			/* Print FIFO information with -debug */
+ 	{
+ 		/* Temporary until all modules know about mp->xxx */
+ 		extern int	bufsize;
+@@ -446,7 +455,7 @@
+ 			/*
+ 			 * Tape -> FIFO (Put side)
+ 			 */
+-			mp->flags |= FIFO_IWAIT;
++			mp->gflags |= FIFO_IWAIT;
+ 			mp->ibs = bs;
+ 			mp->obs = mp->size;
+ 			do_in();	/* Extract mode: read archive in bg. */
+@@ -473,11 +482,89 @@
+ 	}
+ }
+ 
++#ifdef	HANG_DEBUG
++LOCAL char *
++prgflags(f, fbuf)
++	int	f;
++	char	*fbuf;
++{
++	char	*p = fbuf;
++
++	*p = '\0';
++	if (f)
++		*p++ = '\t';
++
++	if (f & FIFO_MERROR) {
++		strcpy(p, "FIFO_MERROR");
++		p += 11;
++	}
++	if (f & FIFO_IWAIT) {
++		if (p > &fbuf[1])
++			*p++ = '|';
++		strcpy(p, "FIFO_IWAIT");
++		p += 10;
++	}
++	if (f & FIFO_I_CHREEL) {
++		if (p > &fbuf[1])
++			*p++ = '|';
++		strcpy(p, "FIFO_I_CHREEL");
++	}
++	return (fbuf);
++}
++
++LOCAL char *
++preflags(f, fbuf)
++	int	f;
++	char	*fbuf;
++{
++	char	*p = fbuf;
++
++	*p = '\0';
++	if (f)
++		*p++ = '\t';
++
++	if (f & FIFO_EXIT) {
++		strcpy(p, "FIFO_EXIT");
++		p += 9;
++	}
++	if (f & FIFO_EXERRNO) {
++		if (p > &fbuf[1])
++			*p++ = '|';
++		strcpy(p, "FIFO_EXERRNO");
++	}
++	return (fbuf);
++}
++
++LOCAL char *
++prpflags(f, fbuf)
++	int	f;
++	char	*fbuf;
++{
++	char	*p = fbuf;
++
++	*p = '\0';
++	if (f)
++		*p++ = '\t';
++
++	if (f & FIFO_MEOF) {
++		strcpy(p, "FIFO_MEOF");
++		p += 9;
++	}
++	if (f & FIFO_O_CHREEL) {
++		if (p > &fbuf[1])
++			*p++ = '|';
++		strcpy(p, "FIFO_O_CHREEL");
++	}
++	return (fbuf);
++}
++#endif
++
+ EXPORT void
+ fifo_prmp(sig)
+ 	int	sig;
+ {
+ #ifdef	HANG_DEBUG
++	char	fbuf[100];
+ extern	BOOL	cflag;
+ 
+ 	if (sig == 0 && !debug)
+@@ -499,13 +586,14 @@
+ 	error("ocnt:     %ld\n", mp->ocnt);
+ 	error("iblocked: %d\n", mp->iblocked);
+ 	error("oblocked: %d\n", mp->oblocked);
++	error("mayoblock:%d\n", mp->mayoblock);
+ 	error("m1:       %d\n", mp->m1);
+ 	error("m2:       %d\n", mp->m2);
+ 	error("chreel:   %d\n", mp->chreel);
+ 	error("reelwait: %d\n", mp->reelwait);
+-	error("eflags:   %2.2X\n", mp->eflags);
+-	error("pflags:   %2.2X\n", mp->pflags);
+-	error("flags:    %2.2X\n", mp->flags);
++	error("eflags:   %2.2X%s\n", mp->eflags, preflags(mp->eflags, fbuf));
++	error("pflags:   %2.2X%s\n", mp->pflags, prpflags(mp->pflags, fbuf));
++	error("flags:    %2.2X%s\n", mp->gflags, prgflags(mp->gflags, fbuf));
+ 	error("hiw:      %d\n", mp->hiw);
+ 	error("low:      %d\n", mp->low);
+ 	error("puts:     %d\n", mp->puts);
+@@ -597,7 +685,7 @@
+ 				pid, ret);
+ 			errmsg("Ib %d Ob %d e %X p %X g %X chan %d.\n",
+ 				mp->iblocked, mp->oblocked,
+-				mp->eflags, mp->pflags, mp->flags,
++				mp->eflags, mp->pflags, mp->gflags,
+ 				chan);
+ 		}
+ 		if ((mp->eflags & FIFO_EXERRNO) != 0) {
+@@ -639,11 +727,11 @@
+ 	return (write(f, &c, 1));
+ }
+ 
+-#define	sgetwait(m, w)		swait((m)->gpin, w)
+-#define	sgetwakeup(m, c)	swakeup((m)->gpout, (c))
++#define	sgetwait(m, w)		swait((m)->gpin, w)	/* Wait in get side */
++#define	sgetwakeup(m, c)	swakeup((m)->gpout, (c)) /* Wakeup get side */
+ 
+-#define	sputwait(m, w)		swait((m)->ppin, w)
+-#define	sputwakeup(m, c)	swakeup((m)->ppout, (c))
++#define	sputwait(m, w)		swait((m)->ppin, w)	/* Wait in put side */
++#define	sputwakeup(m, c)	swakeup((m)->ppout, (c)) /* Wakeup put side */
+ 
+ /*
+  * Return the amount of data from the FIFO available to the reader process.
+@@ -685,13 +773,20 @@
+ 		    !((rmp->eflags & FIFO_EXIT) && cnt == '\0')) {
+ 			errmsgno(EX_BAD,
+ 			"Implementation botch: with FIFO_MEOF\n");
++#ifdef	HANG_DEBUG
++			errmsgno(EX_BAD,
++			    "Pid %ld expect 'n' eflags %x pflags %x gflags %x\n",
++			    (long)getpid(),
++			    rmp->eflags, rmp->pflags, rmp->gflags);
++			fifo_prmp(-1);
++#endif
+ 			comerrno(EX_BAD,
+ 			"Did not wake up from fifo_chitape() - got '%c'.\n",
+ 				cnt);
+ 		}
+-		if (rmp->flags & FIFO_I_CHREEL) {
++		if (rmp->gflags & FIFO_I_CHREEL) {
+ 			changetape(TRUE);
+-			rmp->flags &= ~FIFO_I_CHREEL;
++			rmp->gflags &= ~FIFO_I_CHREEL;
+ 			rmp->pflags &= ~FIFO_MEOF;
+ 			EDEBUG(("t"));
+ 			sgetwakeup(rmp, 't');
+@@ -700,12 +795,15 @@
+ 		}
+ 	}
+ 	while ((cnt = rmp->size - FIFO_AMOUNT(rmp)) < amount) {
+-		if (rmp->flags & FIFO_MERROR) {
++		/*
++		 * Wait until "amount" data fits into the fifo.
++		 */
++		if (rmp->gflags & FIFO_MERROR) {
+ 			fifo_stats();
+ 			exit(1);
+ 		}
+ 		rmp->full++;
+-		rmp->iblocked = TRUE;
++		rmp->iblocked = TRUE;	/* Wait for space to become free */
+ 		EDEBUG(("i"));
+ 		sputwait(rmp, 3);
+ 	}
+@@ -736,6 +834,7 @@
+ 	int	amount;
+ {
+ 	register m_head *rmp = mp;
++	register int	iwait;
+ 
+ 	if (amount <= 0)
+ 		return;
+@@ -745,9 +844,13 @@
+ 	if (rmp->putptr >= rmp->end)
+ 		rmp->putptr = rmp->base;
+ 
+-	if (rmp->oblocked &&
+-			((rmp->flags & FIFO_IWAIT) ||
+-					(FIFO_AMOUNT(rmp) >= rmp->low))) {
++	/*
++	 * If FIFO_IWAIT was set, we always need to call sputwait(rmp, 4); as we
++	 * always get a related wakeup. Since fifo_resume() clears that flag
++	 * before sending the wakeup, we need to evaluate FIFO_IWAIT only once.
++	 */
++	iwait = rmp->gflags & FIFO_IWAIT;
++	if (rmp->oblocked && (iwait || (FIFO_AMOUNT(rmp) >= rmp->low))) {
+ 		/*
+ 		 * Reset oblocked to make sure we send just one single
+ 		 * weakup event
+@@ -756,7 +859,13 @@
+ 		EDEBUG(("d"));
+ 		sgetwakeup(rmp, 'd');
+ 	}
+-	if ((rmp->flags & FIFO_IWAIT)) {
++	/*
++	 * This is when the get side of the FIFO examins the data to decide
++	 * e.g. whether the data needs to be swapped. If we did send the
++	 * wakeup above, we always need to wait for a related wakup that
++	 * permits us to continue.
++	 */
++	if (iwait) {
+ 		EDEBUG(("I"));
+ 		sputwait(rmp, 4);
+ 		/*
+@@ -776,6 +885,14 @@
+ fifo_oflush()
+ {
+ 	mp->pflags |= FIFO_MEOF;
++	/*
++	 * Make us immune gainst against delays caused by a context switch at
++	 * the other side. usleep(1000) will usually not wait at all but may
++	 * yield to a context switch.
++	 */
++	while (mp->mayoblock && !mp->oblocked)
++		usleep(1000);
++
+ 	if (mp->oblocked) {
+ 		/*
+ 		 * Reset oblocked to make sure we send just one single
+@@ -840,7 +957,9 @@
+ 	/*
+ 	 * We need to check rmp->pflags & FIFO_MEOF first, because FIFO_AMOUNT()
+ 	 * gets updated before FIFO_MEOF.
++	 * rmp->mayoblock is used to mark this block to avoid deadlocks.
+ 	 */
++	rmp->mayoblock = TRUE;
+ 	if ((rmp->pflags & (FIFO_MEOF|FIFO_O_CHREEL)) == 0) {
+ 		cnt = FIFO_AMOUNT(rmp);
+ 		if (cnt < amount) {
+@@ -852,12 +971,23 @@
+ 			 * to detect that we expect a wakeup as rmp->oblocked
+ 			 * may be set after the Put process exited.
+ 			 */
++			if (rmp->pflags & (FIFO_MEOF|FIFO_O_CHREEL)) {
++				/*
++				 * There was a context switch between the flag
++				 * check and the amount comutation. The related
++				 * delay changed the state.
++				 */
++				rmp->mayoblock = FALSE;
++				goto again;
++			}
+ 			rmp->empty++;
+ 			rmp->oblocked = TRUE;
++			rmp->mayoblock = FALSE;
+ 			EDEBUG(("o"));
+ 			c = sgetwait(rmp, 5);
+ 		}
+ 	}
++	rmp->mayoblock = FALSE;
+ 
+ 	if (rmp->pflags & FIFO_O_CHREEL) {
+ 		cnt = FIFO_AMOUNT(rmp);
+@@ -935,7 +1065,7 @@
+ 	register m_head *rmp = mp;
+ 
+ 	if (amt <= 0) {
+-		rmp->flags |= FIFO_MERROR;
++		rmp->gflags |= FIFO_MERROR;
+ 		exit(1);
+ 	}
+ 
+@@ -946,6 +1076,9 @@
+ 	if (rmp->getptr >= rmp->end)
+ 		rmp->getptr = rmp->base;
+ 
++	/*
++	 * If rmp->iblocked is TRUE, the put side definitely waits for space.
++	 */
+ 	if (rmp->iblocked && (FIFO_AMOUNT(rmp) <= rmp->hiw)) {
+ 		/*
+ 		 * Reset iblocked to make sure we send just one single
+@@ -988,8 +1121,8 @@
+ {
+ 	register m_head *rmp = mp;
+ 
+-	if ((rmp->flags & FIFO_IWAIT) != 0) {
+-		rmp->flags &= ~FIFO_IWAIT;
++	if ((rmp->gflags & FIFO_IWAIT) != 0) {
++		rmp->gflags &= ~FIFO_IWAIT;
+ 		EDEBUG(("S"));
+ 		sputwakeup(rmp, 'S');
+ 	}
+@@ -1098,7 +1231,7 @@
+ {
+ 	char	c;
+ 
+-	mp->flags |= FIFO_I_CHREEL;
++	mp->gflags |= FIFO_I_CHREEL;
+ 	if (mp->pflags & FIFO_MEOF) {
+ 		EDEBUG(("n"));
+ 		sputwakeup(mp, 'n');
+@@ -1110,6 +1243,13 @@
+ 	c = sgetwait(mp, 6);
+ 	if (c != 't') {
+ 		errmsgno(EX_BAD, "Implementation botch: with FIFO_I_CHREEL\n");
++#ifdef	HANG_DEBUG
++		errmsgno(EX_BAD,
++		    "Pid %ld expect 't' eflags %x pflags %x gflags %x\n",
++		    (long)getpid(),
++		    mp->eflags, mp->pflags, mp->gflags);
++		fifo_prmp(-1);
++#endif
+ 		comerrno(EX_BAD,
+ 			"Did not wake up from fifo_iwait() - got '%c'.\n", c);
+ 	}
+@@ -1126,6 +1266,14 @@
+ 	char	c;
+ 
+ 	mp->pflags |= FIFO_O_CHREEL;
++	/*
++	 * Make us immune gainst against delays caused by a context switch at
++	 * the other side. usleep(1000) will usually not wait at all but may
++	 * yield to a context switch.
++	 */
++	while (mp->mayoblock && !mp->oblocked)
++		usleep(1000);
++
+ 	if (mp->oblocked) {
+ 		/*
+ 		 * Reset oblocked to make sure we send just one single
+@@ -1139,6 +1287,13 @@
+ 	c = sputwait(mp, 7);
+ 	if (c != 'T') {
+ 		errmsgno(EX_BAD, "Implementation botch: with FIFO_O_CHREEL\n");
++#ifdef	HANG_DEBUG
++		errmsgno(EX_BAD,
++		    "Pid %ld expect 'T' eflags %x pflags %x gflags %x\n",
++		    (long)getpid(),
++		    mp->eflags, mp->pflags, mp->gflags);
++		fifo_prmp(-1);
++#endif
+ 		comerrno(EX_BAD,
+ 			"Did not wake up from fifo_owait() - got '%c'.\n", c);
+ 	}
+diff -u star-1.6/star/fifo.h schily-2019-07-15/star/fifo.h
+--- star-1.6/star/fifo.h	2018-10-22 17:43:59.000000000 -0400
++++ schily-2019-07-15/star/fifo.h	2019-06-06 15:22:44.000000000 -0400
+@@ -1,4 +1,4 @@
+-/* @(#)fifo.h	1.36 18/10/22 Copyright 1989-2018 J. Schilling */
++/* @(#)fifo.h	1.38 19/06/06 Copyright 1989-2018 J. Schilling */
+ /*
+  *	Definitions for a "fifo" that uses
+  *	shared memory between two processes
+@@ -81,7 +81,7 @@
+  *
+  * In order to avoid the need for semaphores to control the change of values
+  * in this structure, members marked with "P", are only modified by the
+- * put side of the FIFO and members marked with "G" are only marked by the
++ * put side of the FIFO and members marked with "G" are only modified by the
+  * get side of the FIFO.
+  *
+  * Members marked with "P-" are set by the put side and reset by the get side.
+@@ -104,13 +104,15 @@
+ 	V unsigned long	ocnt;	/* G  output count (incremented on each get) */
+ 	V char	iblocked;	/* P- input  (put side) is blocked	    */
+ 	V char	oblocked;	/* G- output (get side) is blocked	    */
++	V char	mayoblock;	/* G output (get side) may set oblocked	    */
+ 	V char	m1;		/*    Semaphore claimed by newvolhdr()	    */
+ 	V char	m2;		/*    Semaphore claimed by cr_file()	    */
+ 	V char	chreel;		/*    Semaphore claimed by startvol()	    */
+ 	V char	reelwait;	/* P- input (put side) is blocked on "chreel" */
+ 	V char	eflags;		/*    fifo exit flags			    */
+ 	V char	pflags;		/*    fifo put flags			    */
+-	V int	flags;		/*    fifo flags			    */
++	V char	gflags;		/*    fifo get flags			    */
++				/*    2 or 6 bytes of padding		    */
+ 	V int	ferrno;		/*    errno from fifo background process    */
+ 	int	hiw;		/*    highwater mark			    */
+ 	int	low;		/*    lowwater mark			    */
+@@ -140,6 +142,7 @@
+ /*
+  * The FIFO flags are used only inside fifo.c
+  *
++ * gflags:
+  * FIFO_MERROR	 set by the get side
+  * FIFO_IWAIT	 set by the put side before startup, reset by the get side
+  * FIFO_I_CHREEL set by the get side, reset by the put side with get waiting
+@@ -151,6 +154,8 @@
+  * eflags:
+  * FIFO_EXIT	 set by the side that decided to abort the program
+  * FIFO_EXERRNO	 set by the side that decided to abort the program
++ *
++ * If we ever need more than 8 bits, we need to use a larger data type.
+  */
+ #define	FIFO_MERROR	0x001	/* G error on input (get side)	*/
+ 
+diff -u star-1.6/star/header.c schily-2019-07-15/star/header.c
+--- star-1.6/star/header.c	2019-03-26 15:52:23.000000000 -0400
++++ schily-2019-07-15/star/header.c	2019-07-08 16:44:18.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)header.c	1.198 19/03/26 Copyright 1985, 1994-2019 J. Schilling */
++/* @(#)header.c	1.199 19/07/08 Copyright 1985, 1994-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)header.c	1.198 19/03/26 Copyright 1985, 1994-2019 J. Schilling";
++	"@(#)header.c	1.199 19/07/08 Copyright 1985, 1994-2019 J. Schilling";
+ #endif
+ /*
+  *	Handling routines to read/write, parse/create
+@@ -1437,7 +1437,7 @@
+ 						"Uid %lld for '%s' out of range.\n",
+ 						(Ullong)info->f_uid, info->f_name);
+ 					(void) errabort(E_ID, info->f_name, TRUE);
+-				} 
++				}
+ 			}
+ 		} else {
+ 			litos(ptb->dbuf.t_uid, info->f_uid, 7);
+@@ -1467,7 +1467,7 @@
+ 						"Gid %lld for '%s' out of range.\n",
+ 						(Ullong)info->f_gid, info->f_name);
+ 					(void) errabort(E_ID, info->f_name, TRUE);
+-				} 
++				}
+ 			}
+ 		} else {
+ 			litos(ptb->dbuf.t_gid, info->f_gid, 7);
+@@ -1507,7 +1507,7 @@
+ 						"Uid %lld for '%s' out of range.\n",
+ 						(Ullong)info->f_uid, info->f_name);
+ 					(void) errabort(E_ID, info->f_name, TRUE);
+-				} 
++				}
+ 			}
+ 		} else {
+ 			litos(ptb->dbuf.t_uid, info->f_uid, 6);
+@@ -1537,7 +1537,7 @@
+ 						"Gid %lld for '%s' out of range.\n",
+ 						(Ullong)info->f_gid, info->f_name);
+ 					(void) errabort(E_ID, info->f_name, TRUE);
+-				} 
++				}
+ 			}
+ 		} else {
+ 			litos(ptb->dbuf.t_gid, info->f_gid, 6);
+@@ -1578,8 +1578,8 @@
+ 					"Time %lld for '%s' out of range.\n",
+ 					(Ullong)info->f_mtime, info->f_name);
+ 				(void) errabort(E_TIME, info->f_name, TRUE);
+-			} 
+-		}	
++			}
++		}
+ 	} else {
+ 		if (props.pr_flags & PR_XHDR) {
+ 			if (info->f_mnsec != 0)
+diff -u star-1.6/star/lpath_unix.c schily-2019-07-15/star/lpath_unix.c
+--- star-1.6/star/lpath_unix.c	2019-01-13 19:00:11.000000000 -0500
++++ schily-2019-07-15/star/lpath_unix.c	2019-07-07 15:55:06.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)lpath_unix.c	1.13 19/01/14 Copyright 2018-2019 J. Schilling */
++/* @(#)lpath_unix.c	1.14 19/07/07 Copyright 2018-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)lpath_unix.c	1.13 19/01/14 Copyright 2018-2019 J. Schilling";
++	"@(#)lpath_unix.c	1.14 19/07/07 Copyright 2018-2019 J. Schilling";
+ #endif
+ /*
+  *	Routines for long path names on unix like operating systems
+@@ -39,6 +39,10 @@
+ #include <schily/schily.h>
+ #include "starsubs.h"
+ 
++#ifndef	ENAMETOOLONG
++#define	ENAMETOOLONG	EINVAL
++#endif
++
+ EXPORT	int	lchdir		__PR((char *name));
+ #if	defined(IS_SUN) && defined(__SVR4) && defined(DO_CHDIR_LONG)
+ LOCAL	void	sunos5_cwdfix	__PR((void));
+@@ -62,7 +66,7 @@
+ LOCAL	int	_fileopenat	__PR((int fd, char *name, char *mode));
+ EXPORT	int	_lfileopen	__PR((char *name, char *mode));
+ EXPORT	DIR	*lopendir	__PR((char *name));
+-LOCAL	int	hop_dirs	__PR((char *name, char **np));
++EXPORT	int	hop_dirs	__PR((char *name, char **np));
+ 
+ /*
+  * A chdir() implementation that is able to deal with ENAMETOOLONG.
+@@ -801,7 +805,7 @@
+ }
+ 
+ #ifdef	HAVE_FCHDIR
+-LOCAL int
++EXPORT int
+ hop_dirs(name, np)
+ 	char	*name;
+ 	char	**np;
+diff -u star-1.6/star/star.1 schily-2019-07-15/star/star.1
+--- star-1.6/star/star.1	2019-03-27 16:17:45.000000000 -0400
++++ schily-2019-07-15/star/star.1	2019-06-16 08:36:08.000000000 -0400
+@@ -1,4 +1,4 @@
+-. \" @(#)star.1	1.218 19/03/27 Copyr 1982-2019 J. Schilling
++. \" @(#)star.1	1.219 19/06/16 Copyr 1982-2019 J. Schilling
+ . \"  Manual Seite fuer star
+ . \"
+ .if t .ds a \v'-0.55m'\h'0.00n'\z.\h'0.40n'\z.\v'0.55m'\h'-0.40n'a
+@@ -16,7 +16,7 @@
+ .if n .ds U Ue
+ .if n .ds s sz
+ .ds S SS
+-.TH STAR 1 "2019/03/27" "J\*org Schilling" "Schily\'s USER COMMANDS"
++.TH STAR 1 "2019/06/16" "J\*org Schilling" "Schily\'s USER COMMANDS"
+ .SH NAME
+ star \- unique standard tape archiver
+ .SH SYNOPSIS
+@@ -1656,7 +1656,25 @@
+ cannot compare the file type in case of a hard link.
+ .TP 10
+ .B nlink
+-Compare link count on hardlinks.
++Compare link count on hardlinks for all types of files.
++This only works if the archive is in
++.B exustar
++format and contains
++.B star's
++dump extensions.
++.TP 10
++.B dnlink
++Compare link count on hardlinks for directories.
++If comparing 
++.B dnlink
++is excluded but
++.B nlink
++is not excluded, this allows to deal with filesystems that differ
++in their directory implementation.
++The link count of directories in POSIX is equal to the number of manually
++created additional hard links + 1 (as with other file types), while on
++historical UNIX filesystems it is equal to the number of 
++sub-directories + 2 + number of manually created additional hard links.
+ This only works if the archive is in
+ .B exustar
+ format and contains
+diff -u star-1.6/star/star.c schily-2019-07-15/star/star.c
+--- star-1.6/star/star.c	2019-03-27 16:17:45.000000000 -0400
++++ schily-2019-07-15/star/star.c	2019-07-08 16:39:27.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)star.c	1.391 19/03/27 Copyright 1985, 88-90, 92-96, 98, 99, 2000-2019 J. Schilling */
++/* @(#)star.c	1.393 19/07/08 Copyright 1985, 88-90, 92-96, 98, 99, 2000-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)star.c	1.391 19/03/27 Copyright 1985, 88-90, 92-96, 98, 99, 2000-2019 J. Schilling";
++	"@(#)star.c	1.393 19/07/08 Copyright 1985, 88-90, 92-96, 98, 99, 2000-2019 J. Schilling";
+ #endif
+ /*
+  *	Copyright (c) 1985, 88-90, 92-96, 98, 99, 2000-2019 J. Schilling
+@@ -1350,7 +1350,8 @@
+ 	error("\tmode\t\tcompare file permissions\n");
+ 	error("\tsymperm\t\tcompare symlink permissions\n");
+ 	error("\ttype\t\tcompare file type\n");
+-	error("\tnlink\t\tcompare linkcount (star dump mode only)\n");
++	error("\tnlink\t\tcompare all linkcounts (star dump mode only)\n");
++	error("\tdnlink\t\tcompare directory linkcounts (star dump mode only)\n");
+ 	error("\tuid\t\tcompare owner of file\n");
+ 	error("\tgid\t\tcompare group of file\n");
+ 	error("\tuname\t\tcompare name of owner of file\n");
+@@ -2418,7 +2419,9 @@
+ 		} else if (strncmp(optstr, "type", optlen) == 0) {
+ 			optflags |= D_TYPE;
+ 		} else if (strncmp(optstr, "nlink", optlen) == 0) {
+-			optflags |= D_NLINK;
++			optflags |= D_NLINK|D_DNLINK;
++		} else if (strncmp(optstr, "dnlink", optlen) == 0) {
++			optflags |= D_DNLINK;
+ 		} else if (strncmp(optstr, "uid", optlen) == 0) {
+ 			optflags |= D_UID;
+ 		} else if (strncmp(optstr, "gid", optlen) == 0) {
+@@ -2727,7 +2730,7 @@
+ 		ptype = get_ptype(p);
+ 		if (ptype == C_NONE) {
+ 			struct	clis	*clp = clis;
+-		
++
+ 			errmsgno(EX_BAD, "Illegal cli name '%s'.\n", p);
+ 			errmsgno(EX_BAD, "Use one of:");
+ 			while (clp->name) {
+diff -u star-1.6/star/star_unix.c schily-2019-07-15/star/star_unix.c
+--- star-1.6/star/star_unix.c	2019-03-11 15:05:00.000000000 -0400
++++ schily-2019-07-15/star/star_unix.c	2019-07-04 15:59:21.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)star_unix.c	1.118 19/03/11 Copyright 1985, 1995, 2001-2019 J. Schilling */
++/* @(#)star_unix.c	1.119 19/07/04 Copyright 1985, 1995, 2001-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)star_unix.c	1.118 19/03/11 Copyright 1985, 1995, 2001-2019 J. Schilling";
++	"@(#)star_unix.c	1.119 19/07/04 Copyright 1985, 1995, 2001-2019 J. Schilling";
+ #endif
+ /*
+  *	Stat / mode / owner routines for unix like
+@@ -590,8 +590,10 @@
+ #endif  /* USE_ACL */
+ 
+ #ifdef	USE_XATTR
+-	if (dolxattr)
+-		(void) get_xattr(info);
++	/*
++	 * Note: Linux xattr check/fetch has been moved to create.c::take_file()
++	 * for performance reasons.
++	 */
+ #endif
+ 
+ 	return (TRUE);
+diff -u star-1.6/star/starsubs.h schily-2019-07-15/star/starsubs.h
+--- star-1.6/star/starsubs.h	2019-03-11 15:05:00.000000000 -0400
++++ schily-2019-07-15/star/starsubs.h	2019-07-07 15:55:12.000000000 -0400
+@@ -1,4 +1,4 @@
+-/* @(#)starsubs.h	1.135 19/03/11 Copyright 1996-2019 J. Schilling */
++/* @(#)starsubs.h	1.136 19/07/07 Copyright 1996-2019 J. Schilling */
+ /*
+  *	Prototypes for star subroutines
+  *
+@@ -440,7 +440,8 @@
+ #ifdef	_SCHILY_DIRENT_H
+ EXPORT	DIR	*lopendir	__PR((char *name));
+ #endif
+-#endif
++#endif	/* _STAR_H */
++EXPORT	int	hop_dirs	__PR((char *name, char **np));
+ 
+ /*
+  * acl_unix.c
+Common subdirectories: star-1.6/star/tests and schily-2019-07-15/star/tests
+Common subdirectories: star-1.6/star/testscripts and schily-2019-07-15/star/testscripts
+diff -u star-1.6/star/version.c schily-2019-07-15/star/version.c
+--- star-1.6/star/version.c	2019-03-31 18:39:22.000000000 -0400
++++ schily-2019-07-15/star/version.c	2019-06-17 17:50:17.000000000 -0400
+@@ -1,8 +1,8 @@
+-/* @(#)version.c	1.8 19/04/01 Copyright 2018-2019 J. Schilling */
++/* @(#)version.c	1.10 19/06/17 Copyright 2018-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)version.c	1.8 19/04/01 Copyright 2018-2019 J. Schilling";
++	"@(#)version.c	1.10 19/06/17 Copyright 2018-2019 J. Schilling";
+ #endif
+ /*
+  *	Copyright (c) 2018-2019 J. Schilling
+@@ -21,5 +21,5 @@
+  * file and include the License file CDDL.Schily.txt from this distribution.
+  */
+ 
+-char	strvers[] = "1.6";		/* The pure version string	*/
+-char	dvers[]	  = "2019/04/01";	/* Version date			*/
++char	strvers[] = "1.6.1";	/* The pure version string	*/
++char	dvers[]	  = "2019/06/17";	/* Version date			*/
+diff -u star-1.6/star/xattr.c schily-2019-07-15/star/xattr.c
+--- star-1.6/star/xattr.c	2018-08-06 16:48:50.000000000 -0400
++++ schily-2019-07-15/star/xattr.c	2019-07-08 18:58:52.000000000 -0400
+@@ -1,13 +1,13 @@
+-/* @(#)xattr.c	1.22 18/08/06 Copyright 2003-2018 J. Schilling */
++/* @(#)xattr.c	1.23 19/07/09 Copyright 2003-2019 J. Schilling */
+ #include <schily/mconfig.h>
+ #ifndef lint
+ static	UConst char sccsid[] =
+-	"@(#)xattr.c	1.22 18/08/06 Copyright 2003-2018 J. Schilling";
++	"@(#)xattr.c	1.23 19/07/09 Copyright 2003-2019 J. Schilling";
+ #endif
+ /*
+  *	Handle Extended File Attributes on Linux
+  *
+- *	Copyright (c) 2003-2018 J. Schilling
++ *	Copyright (c) 2003-2019 J. Schilling
+  *	Thanks to Anreas Grünbacher <agruen@suse.de> for the
+  *	first implemenation.
+  */
+@@ -27,6 +27,7 @@
+ 
+ #include <schily/stdio.h>
+ #include <schily/stdlib.h>
++#include <schily/errno.h>
+ #include <schily/string.h>
+ #if defined(HAVE_SYS_XATTR_H)
+ #include <sys/xattr.h>
+@@ -38,12 +39,26 @@
+ #include "star.h"
+ #include <schily/standard.h>
+ #include <schily/unistd.h>
++#include <schily/fcntl.h>	/* For open() with hop_dirs() */
+ #define	GT_COMERR		/* #define comerr gtcomerr */
+ #define	GT_ERROR		/* #define error gterror   */
+ #include <schily/schily.h>
+ #include "starsubs.h"
+ #include "checkerr.h"
+ 
++#if defined(USE_XATTR) && \
++	(defined(HAVE_LISTXATTR) || defined(HAVE_LLISTXATTR)) && \
++	(defined(HAVE_GETXATTR) || defined(HAVE_LGETXATTR))
++
++LOCAL	ssize_t	llgetxattr	__PR((char *path, const char *name,
++					void *value, size_t size));
++LOCAL	int	llsetxattr	__PR((char *path, const char *name,
++					const void *value, size_t size,
++					int flags));
++LOCAL	ssize_t	lllistxattr	__PR((char *path, char *list,
++					size_t size));
++#endif	/* USE_XATTR */
++
+ #if defined(USE_XATTR) && defined(HAVE_LISTXATTR) && defined(HAVE_GETXATTR)
+ /*
+  * Use a global list of extended attributes -- FINFO structs have no
+@@ -53,7 +68,7 @@
+  * It bad to see new global variables while we are working on a star library.
+  */
+ LOCAL star_xattr_t	*static_xattr;
+-#endif
++#endif	/* USE_XATTR && HAVE_LISTXATTR && HAVE_GETXATTR */
+ 
+ #ifdef	USE_SELINUX
+ extern	BOOL		selinux_enabled;
+@@ -125,7 +140,7 @@
+ 	info->f_xflags &= ~XF_XATTR;
+ 	info->f_xattr = NULL;
+ 
+-	list_len = llistxattr(info->f_sname, NULL, 0);
++	list_len = lllistxattr(info->f_sname, NULL, 0);
+ 	if (list_len < 0) {
+ 		if (!errhidden(E_GETXATTR, info->f_name)) {
+ 			if (!errwarnonly(E_GETXATTR, info->f_name))
+@@ -138,7 +153,7 @@
+ 		return (FALSE);
+ 	}
+ 	alist = ___malloc(list_len+2, "extended attribute");
+-	list_len = llistxattr(info->f_sname, alist, list_len);
++	list_len = lllistxattr(info->f_sname, alist, list_len);
+ 	if (list_len < 0) {
+ 		if (!errhidden(E_GETXATTR, info->f_name)) {
+ 			if (!errwarnonly(E_GETXATTR, info->f_name))
+@@ -183,7 +198,7 @@
+ 		static_xattr[i].value = NULL;
+ 		strcpy(static_xattr[i].name, lp);
+ 
+-		len = lgetxattr(info->f_sname, lp, NULL, 0);
++		len = llgetxattr(info->f_sname, lp, NULL, 0);
+ 		if (len < 0) {
+ 			if (!errhidden(E_GETXATTR, info->f_name)) {
+ 				if (!errwarnonly(E_GETXATTR, info->f_name))
+@@ -197,7 +212,7 @@
+ 		}
+ 		static_xattr[i].value_len = len;
+ 		static_xattr[i].value = ___malloc(len, "extended attribute");
+-		len = lgetxattr(info->f_sname, lp, static_xattr[i].value, len);
++		len = llgetxattr(info->f_sname, lp, static_xattr[i].value, len);
+ 		if (len < 0) {
+ 			if (!errhidden(E_GETXATTR, info->f_name)) {
+ 				if (!errwarnonly(E_GETXATTR, info->f_name))
+@@ -251,7 +266,7 @@
+ 		    (strcmp(xap->name, "security.selinux") == 0))
+ 			continue;
+ #endif
+-		if (lsetxattr(info->f_name, xap->name, xap->value,
++		if (llsetxattr(info->f_name, xap->name, xap->value,
+ 		    xap->value_len, 0) != 0) {
+ 			if (!errhidden(E_SETXATTR, info->f_name)) {
+ 				if (!errwarnonly(E_SETXATTR, info->f_name))
+@@ -320,3 +335,138 @@
+ 
+ #endif  /* USE_XATTR */
+ }
++
++#if defined(USE_XATTR) && \
++	(defined(HAVE_LISTXATTR) || defined(HAVE_LLISTXATTR)) && \
++	(defined(HAVE_GETXATTR) || defined(HAVE_LGETXATTR))
++
++LOCAL ssize_t
++llgetxattr(path, name, value, size)
++	char		*path;
++	const char	*name;
++	void		*value;
++	size_t		size;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	ssize_t	ret;
++
++	if ((ret = lgetxattr(path, name, value, size)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(path, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = lgetxattr(path, name, value, size);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
++
++LOCAL int
++llsetxattr(path, name, value, size, flags)
++	char		*path;
++	const char	*name;
++	const void	*value;
++	size_t		size;
++	int		flags;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	int	ret;
++
++	if ((ret = lsetxattr(path, name, value, size, flags)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(path, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = lsetxattr(path, name, value, size, flags);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++
++LOCAL ssize_t
++lllistxattr(path, list, size)
++	char		*path;
++	char		*list;
++	size_t		size;
++{
++#ifdef	HAVE_FCHDIR
++	char	*p;
++	int	fd;
++	int	fdh;
++	int	err = 0;
++#endif
++	ssize_t	ret;
++
++	if ((ret = llistxattr(path, list, size)) < 0 &&
++	    geterrno() != ENAMETOOLONG) {
++		return (ret);
++	}
++
++#ifdef	HAVE_FCHDIR
++	if (ret >= 0)
++		return (ret);
++
++	fd = hop_dirs(path, &p);
++	if (fd >= 0) {
++		fdh = open(".", O_SEARCH|O_DIRECTORY|O_NDELAY);
++		if (fdh >= 0) {
++			(void) fchdir(fd);
++			ret = llistxattr(path, list, size);
++			err = geterrno();
++			(void) fchdir(fdh);
++			close(fdh);
++		}
++		close(fd);
++	}
++	close(fd);
++	if (err)
++		seterrno(err);
++#endif
++	return (ret);
++}
++#endif	/* USE_XATTR */
